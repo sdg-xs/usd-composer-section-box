@@ -1,0 +1,36 @@
+[package]
+version = "1.0.0"
+title = "Section Box"
+description = "Interactive section-box clipping tool for the viewport. Provides a 3D manipulable box that clips geometry along its active faces."
+category = "Viewport"
+keywords = ["section", "clipping", "box", "viewport", "cut"]
+icon = "data/icon.png"
+preview_image = "data/preview.png"
+
+[dependencies]
+"omni.ext" = {}
+"omni.ui" = {}
+"omni.ui.scene" = {}
+"omni.usd" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.viewport.window" = {}
+"omni.kit.widget.toolbar" = {}
+
+[[python.module]]
+name = "section_box"
+
+[settings]
+# Whether the section box starts enabled when the extension loads.
+persistent.exts."section.box".enabled = false
+
+# Default half-extents for a new section box (world units).
+persistent.exts."section.box".defaultSize = [100.0, 100.0, 100.0]
+
+# Which faces clip by default.  Valid: MIN_X, MAX_X, MIN_Y, MAX_Y, MIN_Z, MAX_Z.
+persistent.exts."section.box".defaultFaces = ["MIN_X", "MAX_X", "MIN_Y", "MAX_Y", "MIN_Z", "MAX_Z"]
+
+# When true the section box is written to a USD prim and saved with the stage.
+persistent.exts."section.box".persistToStage = false
+
+# USD prim path used when persistToStage is enabled.
+persistent.exts."section.box".stagePrimPath = "/SectionBox"
