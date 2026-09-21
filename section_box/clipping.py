@@ -1,117 +1,97 @@
-"""Push the section box's cut plane into the active viewport.
-
-RTX exposes exactly one section plane, not six: the render-settings schema has
-``sectionPlane:plane``, a single ``[nx, ny, nz, -d]``.  So a six-sided box cannot
-clip on six sides.  We cut on the first active face in ``Face`` order, which is
-the first entry ``active_planes()`` returns.
-
-The plane is written to the render product's ``omni:rtx:scene:sectionPlane:plane``
-attribute rather than to ``/rtx/sectionPlane/plane`` directly — the same route
-``omni.kit.window.section`` takes, because the raw setting breaks in a live session.
-"""
+"""Apply all enabled box faces to the active viewport's RTX render product."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import carb
-import carb.settings
-import omni.usd
+import omni.kit.app
 import omni.kit.viewport.utility as vp_util
+from pxr import Usd
 
 if TYPE_CHECKING:
     from .state import SectionBoxState
 
-# Mirrors omni.kit.window.section's constants, so both tools agree on the target.
-_SETTING_SECTION_ENABLED = "/rtx/sectionPlane/enabled"
+_ENABLED_ATTR = "omni:rtx:scene:sectionPlane:enabled"
 _PLANE_ATTR = "omni:rtx:scene:sectionPlane:plane"
 
 
 class ClipPlaneController:
-    """Bridges the section-box model to the renderer's single section plane."""
-
     def __init__(self, state: SectionBoxState) -> None:
         self._state = state
-        self._active = False
+        self._target = None
+        self._previous_plane = None
+        self._previous_enabled = None
+        self._dirty = True
         self._state.add_listener(self._on_state_changed)
+        self._update_sub = (
+            omni.kit.app.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(self._on_update, name="section.box.clipping")
+        )
+        self._on_update(None)
 
     def destroy(self) -> None:
+        self._update_sub = None
         self._state.remove_listener(self._on_state_changed)
-        self._clear_plane()
-
-    # --- listener callback ---------------------------------------------------
+        self._clear_planes()
 
     def _on_state_changed(self, state: SectionBoxState) -> None:
-        if state.enabled:
-            self._push_plane()
-        else:
-            self._clear_plane()
+        self._dirty = True
+        self._on_update(None)
 
-    # --- viewport interaction ------------------------------------------------
-
-    def _push_plane(self) -> None:
-        """Send the box's leading active face to the renderer as the section plane."""
-        try:
-            planes = self._state.box.active_planes()
-            if not planes:
-                self._clear_plane()
-                return
-
-            nx, ny, nz, d = planes[0]
-            if not self._set_plane_attribute([nx, ny, nz, d]):
-                return
-
-            carb.settings.get_settings().set(_SETTING_SECTION_ENABLED, True)
-            self._active = True
-        except Exception:  # noqa: BLE001
-            carb.log_warn("[section.box] Failed to push the section plane")
-            import traceback
-            traceback.print_exc()
-
-    def _clear_plane(self) -> None:
-        """Switch the renderer's section plane back off."""
-        if not self._active:
+    def _on_update(self, event) -> None:
+        self._state.sync_stage()
+        if not self._state.enabled or not self._state.box.faces:
+            self._clear_planes()
             return
-        try:
-            carb.settings.get_settings().set(_SETTING_SECTION_ENABLED, False)
-            self._active = False
-        except Exception:  # noqa: BLE001
-            carb.log_warn("[section.box] Failed to clear the section plane")
-            import traceback
-            traceback.print_exc()
 
-    @staticmethod
-    def _set_plane_attribute(plane: list[float]) -> bool:
-        """Write *plane* to the active render product. True when it landed."""
-        viewport_api = ClipPlaneController._get_viewport_api()
-        if viewport_api is None:
-            carb.log_warn("[section.box] No active viewport; section plane not set")
-            return False
+        viewport = vp_util.get_active_viewport(usd_context_name=None)
+        stage = viewport.stage if viewport else None
+        target = (stage, viewport.render_product_path) if stage else None
+        if target != self._target:
+            self._clear_planes()
+            self._dirty = True
+        if target is None or not self._dirty:
+            return
 
-        stage = omni.usd.get_context().get_stage()
-        if stage is None:
-            return False
-
-        prim = stage.GetPrimAtPath(viewport_api.render_product_path)
-        if not prim or not prim.IsValid():
-            carb.log_warn("[section.box] Render product prim unavailable")
-            return False
-
-        attr = prim.GetAttribute(_PLANE_ATTR)
+        stage, path = target
+        prim = stage.GetPrimAtPath(path)
+        attr = prim.GetAttribute(_PLANE_ATTR) if prim else None
         if not attr:
-            carb.log_warn(f"[section.box] {_PLANE_ATTR} missing on the render product")
-            return False
+            return  # The render product may arrive after the stage opens.
 
-        attr.Set(plane)
-        return True
+        if self._target is None:
+            spec = stage.GetSessionLayer().GetAttributeAtPath(attr.GetPath())
+            self._previous_plane = spec.default if spec and spec.HasInfo("default") else None
+            enabled_spec = stage.GetSessionLayer().GetAttributeAtPath(prim.GetAttribute(_ENABLED_ATTR).GetPath())
+            self._previous_enabled = enabled_spec.default if enabled_spec and enabled_spec.HasInfo("default") else None
+            self._target = target
 
-    @staticmethod
-    def _get_viewport_api():
-        """Return the active viewport API, or None if unavailable."""
-        try:
-            viewport_window = vp_util.get_active_viewport_window()
-            if viewport_window is None:
-                return None
-            return viewport_window.viewport_api
-        except Exception:  # noqa: BLE001
-            return None
+        # The model uses outward normals. RTX keeps the positive half-space,
+        # so negate all four coefficients to retain the interior of the box.
+        planes = [-value for plane in self._state.box.active_planes() for value in plane]
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            attr.Set(planes if planes else [0.0, 0.0, 0.0, 0.0])
+            prim.GetAttribute(_ENABLED_ATTR).Set(bool(planes))
+        self._dirty = False
+
+    def _clear_planes(self) -> None:
+        if self._target is None:
+            return
+        stage, path = self._target
+        prim = stage.GetPrimAtPath(path)
+        attr = prim.GetAttribute(_PLANE_ATTR) if prim else None
+        if attr:
+            with Usd.EditContext(stage, stage.GetSessionLayer()):
+                if self._previous_plane is None:
+                    attr.Clear()
+                else:
+                    attr.Set(self._previous_plane)
+                enabled_attr = prim.GetAttribute(_ENABLED_ATTR)
+                if self._previous_enabled is None:
+                    enabled_attr.Clear()
+                else:
+                    enabled_attr.Set(self._previous_enabled)
+        self._target = None
+        self._previous_plane = None
+        self._dirty = True

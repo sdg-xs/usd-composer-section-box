@@ -1,140 +1,162 @@
-"""Mutable runtime state for the section box, with observer-pattern notifications.
-
-The immutable ``SectionBox`` dataclass holds the geometry.  This wrapper adds:
-* a single mutable reference that can be swapped atomically,
-* a callback list so the UI, manipulator, and clipping modules stay in sync,
-* helpers to read/write persistent settings via Carbonite.
-"""
+"""Runtime inspection state, scoped to the active viewport's USD stage."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Optional
+from dataclasses import dataclass, replace
 
 import carb.settings
-
-from .model import Face, SectionBox
-
+import omni.kit.viewport.utility as vp_util
+import omni.usd
 from pxr import Gf
 
-# Carbonite setting keys — must match config/extension.toml.
-_KEY_ENABLED = "/persistent/exts/section.box/enabled"
-_KEY_DEFAULT_SIZE = "/persistent/exts/section.box/defaultSize"
-_KEY_DEFAULT_FACES = "/persistent/exts/section.box/defaultFaces"
-_KEY_PERSIST_TO_STAGE = "/persistent/exts/section.box/persistToStage"
-_KEY_STAGE_PRIM_PATH = "/persistent/exts/section.box/stagePrimPath"
+from .commands import EditSectionBox, execute
+from .model import Face, SectionBox
 
-Listener = Callable[["SectionBoxState"], None]
+
+@dataclass(frozen=True)
+class Inspection:
+    box: SectionBox
+    enabled: bool = False
+    show_box: bool = True
+    saved_position_path: str = ""
 
 
 class SectionBoxState:
-    """Observable, mutable container for the current section-box configuration."""
-
     def __init__(self) -> None:
         self._settings = carb.settings.get_settings()
-        self._listeners: list[Listener] = []
-        self._enabled: bool = False
-        self._box: SectionBox = self._box_from_settings()
+        self._listeners: list[Callable] = []
+        self._value = Inspection(self.default_box())
+        self._edit_start = None
+        self.generation = 0
+        self.stage = None
+        self._context = None
+        self._stage_event_sub = None
+        self.sync_stage()
 
-    # --- public properties ---------------------------------------------------
+    @staticmethod
+    def active_context():
+        viewport = vp_util.get_active_viewport(usd_context_name=None)
+        return omni.usd.get_context(viewport.usd_context_name if viewport else "")
+
+    def sync_stage(self) -> None:
+        context = self.active_context()
+        if context != self._context:
+            self._context = context
+            self._stage_event_sub = (
+                context.get_stage_event_stream().create_subscription_to_pop(self._on_stage_event) if context else None
+            )
+        stage = context.get_stage() if context else None
+        if stage != self.stage:
+            self.stage = stage
+            self.generation += 1
+            self._edit_start = None
+            self._value = Inspection(self.default_box())
+            self.notify()
+
+    def _on_stage_event(self, event) -> None:
+        if event.type in (int(omni.usd.StageEventType.OPENED), int(omni.usd.StageEventType.CLOSED)):
+            self.sync_stage()
+
+    def destroy(self) -> None:
+        self.generation += 1
+        self._stage_event_sub = None
+        self._edit_start = None
+        self._listeners.clear()
 
     @property
-    def enabled(self) -> bool:
-        return self._enabled
+    def snapshot(self) -> Inspection:
+        return self._value
 
-    @enabled.setter
-    def enabled(self, value: bool) -> None:
-        if value == self._enabled:
+    def apply(self, value: Inspection) -> None:
+        if value != self._value:
+            self._value = value
+            self.notify()
+
+    def edit(self, **changes) -> None:
+        self.sync_stage()
+        value = replace(self._value, **changes)
+        if value == self._value:
             return
-        self._enabled = value
-        self._settings.set(_KEY_ENABLED, value)
-        self._notify()
+        if self._edit_start is not None:
+            self.apply(value)
+        else:
+            execute(EditSectionBox, state=self, before=self._value, after=value, generation=self.generation)
+
+    def begin_edit(self) -> None:
+        self.sync_stage()
+        self._edit_start = self._value
+
+    def end_edit(self) -> None:
+        before, self._edit_start = self._edit_start, None
+        if before is not None and before != self._value:
+            execute(EditSectionBox, state=self, before=before, after=self._value, generation=self.generation)
 
     @property
     def box(self) -> SectionBox:
-        return self._box
+        return self._value.box
 
     @box.setter
     def box(self, value: SectionBox) -> None:
-        self._box = value
-        self._notify()
+        self.apply(replace(self._value, box=value))
 
     @property
-    def persist_to_stage(self) -> bool:
-        return bool(self._settings.get(_KEY_PERSIST_TO_STAGE))
+    def enabled(self) -> bool:
+        return self._value.enabled
 
-    @persist_to_stage.setter
-    def persist_to_stage(self, value: bool) -> None:
-        self._settings.set(_KEY_PERSIST_TO_STAGE, value)
-        self._notify()
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self.apply(replace(self._value, enabled=value))
+
+    @property
+    def show_box(self) -> bool:
+        return self._value.show_box
+
+    @property
+    def saved_position_path(self) -> str:
+        return self._value.saved_position_path
 
     @property
     def stage_prim_path(self) -> str:
-        return str(self._settings.get(_KEY_STAGE_PRIM_PATH) or "/SectionBox")
+        return str(self._settings.get("/persistent/exts/section.box/stagePrimPath") or "/SectionBox")
 
-    # --- observer pattern ----------------------------------------------------
-
-    def add_listener(self, callback: Listener) -> None:
+    def add_listener(self, callback: Callable) -> None:
         if callback not in self._listeners:
             self._listeners.append(callback)
 
-    def remove_listener(self, callback: Listener) -> None:
-        try:
+    def remove_listener(self, callback: Callable) -> None:
+        if callback in self._listeners:
             self._listeners.remove(callback)
-        except ValueError:
-            pass
-
-    # --- convenience mutators ------------------------------------------------
 
     def toggle_face(self, face: Face) -> None:
-        """Toggle a single face on or off."""
-        faces = set(self._box.faces)
-        if face in faces:
-            faces.discard(face)
-        else:
-            faces.add(face)
-        self.box = SectionBox(
-            transform=self._box.transform,
-            size=self._box.size,
-            faces=frozenset(faces),
-        )
+        self.set_face(face, face not in self.box.faces)
+
+    def set_face(self, face: Face, active: bool) -> None:
+        self.edit(box=self.box.with_face(face, active))
 
     def set_size_component(self, axis: int, value: float) -> None:
-        """Set one axis of the size vector (0=X, 1=Y, 2=Z)."""
-        components = [self._box.size[0], self._box.size[1], self._box.size[2]]
+        components = list(self.box.size)
         components[axis] = max(0.0, value)
-        self.box = SectionBox(
-            transform=self._box.transform,
-            size=Gf.Vec3d(*components),
-            faces=self._box.faces,
-        )
+        self.edit(box=replace(self.box, size=Gf.Vec3d(*components)))
 
     def reset(self) -> None:
-        """Reset to the defaults stored in persistent settings."""
-        self._box = self._box_from_settings()
-        self._notify()
+        self.edit(box=self.default_box(), saved_position_path="")
 
-    # --- internals -----------------------------------------------------------
+    def default_box(self) -> SectionBox:
+        size = self._settings.get("/persistent/exts/section.box/defaultSize") or [100.0] * 3
+        names = self._settings.get("/persistent/exts/section.box/defaultFaces")
+        faces = (
+            frozenset(Face[name] for name in names if name in Face.__members__)
+            if names is not None
+            else frozenset(Face)
+        )
+        return SectionBox(size=Gf.Vec3d(*size), faces=faces)
 
-    def _box_from_settings(self) -> SectionBox:
-        raw_size = self._settings.get(_KEY_DEFAULT_SIZE)
-        if raw_size and len(raw_size) == 3:
-            size = Gf.Vec3d(*[float(v) for v in raw_size])
-        else:
-            size = Gf.Vec3d(100.0, 100.0, 100.0)
-
-        raw_faces = self._settings.get(_KEY_DEFAULT_FACES)
-        if raw_faces:
-            faces = frozenset(Face[name] for name in raw_faces if name in Face.__members__)
-        else:
-            faces = frozenset(Face)
-
-        return SectionBox(size=size, faces=faces)
-
-    def _notify(self) -> None:
+    def notify(self) -> None:
         for listener in list(self._listeners):
             try:
                 listener(self)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 import traceback
+
                 traceback.print_exc()

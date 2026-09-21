@@ -6,6 +6,7 @@ These tests require the Kit runtime and are intended to be run via
 
 from __future__ import annotations
 
+import carb.settings
 import omni.kit.test
 import omni.usd
 
@@ -18,16 +19,31 @@ class TestSectionBoxExtension(omni.kit.test.AsyncTestCase):
 
     async def setUp(self):
         """Create a fresh state before each test."""
+        self._settings = carb.settings.get_settings()
+        defaults = {
+            "/persistent/exts/section.box/defaultSize": [100.0, 100.0, 100.0],
+            "/persistent/exts/section.box/defaultFaces": [face.name for face in Face],
+        }
+        self._saved_settings = {key: self._settings.get(key) for key in defaults}
+        for key, value in defaults.items():
+            self._settings.set(key, value)
         self._state = SectionBoxState()
 
     async def tearDown(self):
+        self._state.destroy()
         self._state = None
+        for key, value in self._saved_settings.items():
+            if value is None:
+                self._settings.destroy_item(key)
+            else:
+                self._settings.set(key, value)
 
     # --- extension lifecycle -------------------------------------------------
 
     async def test_extension_loads(self):
         """The extension module imports without error."""
         import section_box
+
         self.assertIsNotNone(section_box.SectionBoxExtension)
 
     # --- state ---------------------------------------------------------------
@@ -92,15 +108,14 @@ class TestSectionBoxExtension(omni.kit.test.AsyncTestCase):
 
         box = SectionBox.for_bounds((-10.0, -20.0, -30.0), (10.0, 20.0, 30.0))
         self.assertEqual(box.size, Gf.Vec3d(20.0, 40.0, 60.0))
-        self.assertEqual(
-            box.transform.ExtractTranslation(), Gf.Vec3d(0.0, 0.0, 0.0)
-        )
+        self.assertEqual(box.transform.ExtractTranslation(), Gf.Vec3d(0.0, 0.0, 0.0))
 
     # --- listener cleanup ----------------------------------------------------
 
     async def test_remove_listener(self):
         """Removing a listener stops further notifications."""
         count = [0]
+
         def listener(s):
             count[0] += 1
 

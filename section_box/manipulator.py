@@ -1,195 +1,107 @@
-"""Viewport manipulator — draws the section box wireframe and interactive handles.
-
-Renders:
-* 12-edge wireframe from ``corners()`` + ``EDGE_INDICES``
-* Semi-transparent face shading on active clip faces
-* Centre sphere (translate drag gesture)
-* 6 face-centre handles (resize drag gesture)
-"""
+"""Persistent viewport shapes for moving and resizing the section box."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
-
 import omni.ui as ui
 import omni.ui.scene as sc
-
 from pxr import Gf
 
-from .model import Face, EDGE_INDICES, SectionBox
 from .manipulator_model import SectionBoxManipulatorModel
+from .model import AXIS_VECTORS, EDGE_INDICES, Face
 
-if TYPE_CHECKING:
-    from .state import SectionBoxState
-
-# Visual constants.
 _WIRE_COLOR = ui.color(0.2, 0.85, 1.0, 0.9)
-_ACTIVE_FACE_COLOR = ui.color(0.2, 0.85, 1.0, 0.15)
+_FACE_COLOR = [0.2, 0.85, 1.0, 0.08]
 _HANDLE_COLOR = ui.color(1.0, 0.6, 0.1, 1.0)
 _CENTER_COLOR = ui.color(1.0, 1.0, 0.2, 1.0)
-_HANDLE_RADIUS = 4.0
-_CENTER_RADIUS = 6.0
-
-# Maps each Face to the two axes (u, v) that span that face's quad, and the
-# sign along the face's own axis.
-_FACE_QUAD_AXES: dict[Face, tuple[int, int]] = {
-    Face.MIN_X: (1, 2), Face.MAX_X: (1, 2),
-    Face.MIN_Y: (0, 2), Face.MAX_Y: (0, 2),
-    Face.MIN_Z: (0, 1), Face.MAX_Z: (0, 1),
-}
 
 
-class _TranslateDragGesture(sc.DragGesture):
-    """Drag the centre handle to translate the box."""
-
+class _BoxDragGesture(sc.DragGesture):
     def __init__(self, model: SectionBoxManipulatorModel, **kwargs):
         super().__init__(**kwargs)
         self._model = model
 
+    def on_began(self):
+        self._model.state.begin_edit()
+
+    def on_ended(self):
+        self._model.state.end_edit()
+
+
+class _TranslateDragGesture(_BoxDragGesture):
     def on_changed(self):
-        # gesture_payload.moved is the delta since the previous event, not the
-        # total since on_began, so each one is applied on top of the last.
         moved = self.sender.gesture_payload.moved
-        current = self._model.get_as_floats(self._model.get_item("position"))
-        new_pos = [current[i] + moved[i] for i in range(3)]
-        self._model.set_floats(self._model.get_item("position"), new_pos)
+        state = self._model.state
+        state.edit(box=state.box.translated(Gf.Vec3d(*moved)))
 
 
-class _ResizeDragGesture(sc.DragGesture):
-    """Drag a face handle to resize the box along that face's axis."""
-
+class _ResizeDragGesture(_BoxDragGesture):
     def __init__(self, model: SectionBoxManipulatorModel, face: Face, **kwargs):
-        super().__init__(**kwargs)
-        self._model = model
+        super().__init__(model, **kwargs)
         self._face = face
 
     def on_changed(self):
         box = self._model.state.box
-        moved = self.sender.gesture_payload.moved
-        # The drag arrives in world space, so project it onto the face's outward
-        # direction in world space — indexing moved[axis] only works unrotated.
-        outward = box.transform.TransformDir(
-            _AXIS_VECTORS[self._face.axis] * self._face.sign
-        )
+        moved = Gf.Vec3d(*self.sender.gesture_payload.moved)
+        outward = box.transform.TransformDir(AXIS_VECTORS[self._face.axis] * self._face.sign)
         length = outward.GetLength()
         if length == 0.0:
             return
-        outward = outward / length
-        delta = Gf.Dot(Gf.Vec3d(moved[0], moved[1], moved[2]), outward)
-        self._model.state.box = box.resized(self._face, delta)
+        delta = Gf.Dot(moved, outward / length) / length
+        self._model.state.edit(box=box.resized(self._face, delta))
 
 
 class SectionBoxManipulator(sc.Manipulator):
-    """Draws the section box wireframe and interactive handles in the viewport."""
-
     def __init__(self, model: SectionBoxManipulatorModel, **kwargs):
+        self._model = model
+        self._root = None
+        self._lines = []
+        self._faces = {}
+        self._handles = {}
+        self._center = None
         super().__init__(model=model, **kwargs)
-        self._model: SectionBoxManipulatorModel = model
 
     def on_build(self):
-        """Called by the scene framework whenever the model signals a change."""
-        state = self._model.state
-        if not state.enabled:
-            return
+        self._lines = []
+        self._faces = {}
+        self._handles = {}
+        with sc.Transform() as self._root:
+            for _ in EDGE_INDICES:
+                self._lines.append(sc.Line([0, 0, 0], [0, 0, 0], color=_WIRE_COLOR, thickness=1.5))
+            for face in Face:
+                self._faces[face] = sc.PolygonMesh([[0, 0, 0]] * 4, [_FACE_COLOR] * 4, [4], [0, 1, 2, 3])
+                self._handles[face] = self._create_handle(5.0, _HANDLE_COLOR, _ResizeDragGesture(self._model, face))
+            self._center = self._create_handle(7.0, _CENTER_COLOR, _TranslateDragGesture(self._model))
+        self._update_geometry()
 
-        box = state.box
-        corners = box.corners()
-
-        # --- wireframe edges -------------------------------------------------
-        for i, j in EDGE_INDICES:
-            a, b = corners[i], corners[j]
-            sc.Line(
-                [a[0], a[1], a[2]],
-                [b[0], b[1], b[2]],
-                color=_WIRE_COLOR,
-                thickness=1.5,
-            )
-
-        # --- semi-transparent shading on active faces ------------------------
-        half = box.size * 0.5
-        for face in Face:
-            if face not in box.faces:
-                continue
-            self._draw_face_quad(box, face, corners)
-
-        # --- centre translate handle -----------------------------------------
-        centre = box.transform.ExtractTranslation()
-        with sc.Transform(transform=sc.Matrix44.get_translation_matrix(
-            centre[0], centre[1], centre[2]
-        )):
-            sc.Arc(
-                _CENTER_RADIUS,
-                color=_CENTER_COLOR,
-                thickness=2.0,
-                gesture=_TranslateDragGesture(self._model),
-            )
-
-        # --- face-centre resize handles --------------------------------------
-        for face in Face:
-            face_centre = self._face_centre(box, face)
-            with sc.Transform(transform=sc.Matrix44.get_translation_matrix(
-                face_centre[0], face_centre[1], face_centre[2]
-            )):
-                sc.Arc(
-                    _HANDLE_RADIUS,
-                    color=_HANDLE_COLOR,
-                    thickness=2.0,
-                    gesture=_ResizeDragGesture(self._model, face),
-                )
+    @staticmethod
+    def _create_handle(radius, color, gesture):
+        with sc.Transform() as position:
+            with sc.Transform(look_at=sc.Transform.LookAt.CAMERA, scale_to=sc.Space.SCREEN):
+                sc.Rectangle(radius * 2, radius * 2, color=color, gesture=gesture)
+        return position
 
     def on_model_updated(self, item):
-        """Invalidate the visual when any model item changes."""
-        self.invalidate()
+        # Keep gesture senders alive throughout a drag instead of rebuilding them.
+        if self._root is not None:
+            self._update_geometry()
 
-    # --- helpers -------------------------------------------------------------
-
-    @staticmethod
-    def _face_centre(box: SectionBox, face: Face) -> Gf.Vec3d:
-        """Compute the world-space centre of a face."""
-        axis = face.axis
-        half = box.size * 0.5
-        local = Gf.Vec3d(0.0, 0.0, 0.0)
-        local[axis] = half[axis] * face.sign
-        return box.transform.Transform(local)
-
-    @staticmethod
-    def _draw_face_quad(
-        box: SectionBox, face: Face, corners: list[Gf.Vec3d]
-    ) -> None:
-        """Draw a semi-transparent quad for an active face."""
-        # Identify the 4 corners that lie on this face.
-        axis = face.axis
-        bit = 1 << axis
-        positive = face.sign > 0
-        indices = [
-            i for i in range(8)
-            if bool(i & bit) == positive
-        ]
-        if len(indices) != 4:
-            return
-
-        # Sort corners into a winding order for the quad.
-        pts = [corners[i] for i in indices]
-        centre = sum((p for p in pts), Gf.Vec3d(0, 0, 0)) * 0.25
-        # Simple planar sort by angle around the face centre.
-        u_axis, v_axis = _FACE_QUAD_AXES[face]
-
-        import math
-        def angle_key(p):
-            return math.atan2(
-                (p - centre)[v_axis],
-                (p - centre)[u_axis],
+    def _update_geometry(self):
+        state = self._model.state
+        self._root.visible = state.enabled and state.show_box
+        box = state.box
+        corners = [list(point) for point in box.corners()]
+        for line, (a, b) in zip(self._lines, EDGE_INDICES):
+            line.start, line.end = corners[a], corners[b]
+            line.visible = any(
+                bool(a & (1 << face.axis)) == bool(b & (1 << face.axis)) == (face.sign > 0)
+                for face in box.faces
             )
-
-        pts.sort(key=angle_key)
-
-        # Draw as two triangles (sc doesn't have a filled quad primitive).
-        for tri_indices in ((0, 1, 2), (0, 2, 3)):
-            verts = []
-            for ti in tri_indices:
-                p = pts[ti]
-                verts.extend([p[0], p[1], p[2]])
-            sc.TriangleStrip(
-                verts,
-                colors=[_ACTIVE_FACE_COLOR],
-            )
+        for face in Face:
+            indices = [i for i in range(8) if bool(i & (1 << face.axis)) == (face.sign > 0)]
+            # Corner bit order makes a perimeter in 0, 1, 3, 2 order, even after rotation.
+            self._faces[face].positions = [corners[indices[i]] for i in (0, 1, 3, 2)]
+            self._faces[face].visible = face in box.faces
+            self._handles[face].visible = face in box.faces
+            local = AXIS_VECTORS[face.axis] * face.sign * box.size[face.axis] * 0.5
+            self._handles[face].transform = sc.Matrix44.get_translation_matrix(*box.transform.Transform(local))
+        self._center.transform = sc.Matrix44.get_translation_matrix(*box.transform.ExtractTranslation())

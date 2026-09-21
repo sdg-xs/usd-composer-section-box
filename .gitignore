@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .vscode/
+verification/
+dist/
+.ruff_cache/

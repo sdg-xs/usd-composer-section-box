@@ -30,23 +30,14 @@ class Face(Enum):
         return Face((self.axis, -self.sign))
 
 
-_AXIS_VECTORS: tuple[Gf.Vec3d, Gf.Vec3d, Gf.Vec3d] = (
+AXIS_VECTORS: tuple[Gf.Vec3d, Gf.Vec3d, Gf.Vec3d] = (
     Gf.Vec3d(1.0, 0.0, 0.0),
     Gf.Vec3d(0.0, 1.0, 0.0),
     Gf.Vec3d(0.0, 0.0, 1.0),
 )
 
-# Gf is row-vector, so a row is the image of a local basis vector: row 2 is where local +Z lands.
-_ALIGNMENT_ROWS: dict[int, tuple[tuple[float, float, float], ...]] = {
-    0: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
-    1: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
-    2: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-}
-
 # Lives beside corners() because the pairs are meaningless without that corner bit ordering.
-EDGE_INDICES: tuple[tuple[int, int], ...] = tuple(
-    (i, i | bit) for i in range(8) for bit in (1, 2, 4) if not i & bit
-)
+EDGE_INDICES: tuple[tuple[int, int], ...] = tuple((i, i | bit) for i in range(8) for bit in (1, 2, 4) if not i & bit)
 
 _VALID_AXES = (0, 1, 2)
 
@@ -67,7 +58,7 @@ class SectionBox:
         for face in Face:
             if face not in self.faces:
                 continue
-            local_normal = _AXIS_VECTORS[face.axis] * face.sign
+            local_normal = AXIS_VECTORS[face.axis] * face.sign
             normal = self.transform.TransformDir(local_normal)
             # The transform may carry scale, which TransformDir passes straight through.
             length = normal.GetLength()
@@ -77,9 +68,7 @@ class SectionBox:
             local_point = local_normal * (self.size[face.axis] / 2.0)
             point = self.transform.Transform(local_point)
             offset = Gf.Dot(point, normal)
-            planes.append(
-                (float(normal[0]), float(normal[1]), float(normal[2]), float(-offset))
-            )
+            planes.append((float(normal[0]), float(normal[1]), float(normal[2]), float(-offset)))
         return planes
 
     def corners(self) -> list[Gf.Vec3d]:
@@ -95,16 +84,13 @@ class SectionBox:
             for i in range(8)
         ]
 
-    def with_alignment(self, axis: int) -> SectionBox:
-        _require_axis(axis)
-        rows = _ALIGNMENT_ROWS[axis]
-        rotation = Gf.Matrix3d(*rows[0], *rows[1], *rows[2])
-        transform = Gf.Matrix4d(rotation, self.transform.ExtractTranslation())
-        return replace(self, transform=transform)
+    def with_face(self, face: Face, active: bool) -> SectionBox:
+        faces = self.faces | {face} if active else self.faces - {face}
+        return replace(self, faces=frozenset(faces))
 
     def rotated(self, axis: int, degrees: float) -> SectionBox:
         _require_axis(axis)
-        rotation = Gf.Matrix3d().SetRotate(Gf.Rotation(_AXIS_VECTORS[axis], degrees))
+        rotation = Gf.Matrix3d().SetRotate(Gf.Rotation(AXIS_VECTORS[axis], degrees))
         # Pre-multiplying applies the turn in the box's own frame, before its existing orientation.
         linear = rotation * self.transform.ExtractRotationMatrix()
         transform = Gf.Matrix4d(linear, self.transform.ExtractTranslation())
@@ -113,13 +99,11 @@ class SectionBox:
     def translated(self, offset: Gf.Vec3d) -> SectionBox:
         """Return a copy shifted by *offset* in world space."""
         new_transform = Gf.Matrix4d(self.transform)
-        new_transform.SetTranslateOnly(
-            self.transform.ExtractTranslation() + offset
-        )
+        new_transform.SetTranslateOnly(self.transform.ExtractTranslation() + offset)
         return replace(self, transform=new_transform)
 
     def resized(self, face: Face, delta: float) -> SectionBox:
-        """Grow or shrink the box by *delta* world-units on *face*'s axis.
+        """Grow or shrink the box by *delta* local units on *face*'s axis.
 
         Positive *delta* always pushes the face outward (away from the centre),
         negative pulls it inward.  The opposite face stays fixed, so the centre
@@ -132,22 +116,16 @@ class SectionBox:
         new_size = Gf.Vec3d(*components)
 
         # Shift the centre so the opposite face doesn't move.
-        shift = self.transform.TransformDir(
-            _AXIS_VECTORS[axis] * face.sign * (delta / 2.0)
-        )
+        shift = self.transform.TransformDir(AXIS_VECTORS[axis] * face.sign * ((new_extent - self.size[axis]) / 2.0))
         new_transform = Gf.Matrix4d(self.transform)
-        new_transform.SetTranslateOnly(
-            self.transform.ExtractTranslation() + shift
-        )
+        new_transform.SetTranslateOnly(self.transform.ExtractTranslation() + shift)
         return replace(self, transform=new_transform, size=new_size)
 
     def inverted(self) -> SectionBox:
         return replace(self, faces=frozenset(face.opposite for face in self.faces))
 
     @classmethod
-    def for_bounds(
-        cls, minimum: Sequence[float], maximum: Sequence[float]
-    ) -> SectionBox:
+    def for_bounds(cls, minimum: Sequence[float], maximum: Sequence[float]) -> SectionBox:
         size = Gf.Vec3d(*(max(0.0, maximum[i] - minimum[i]) for i in range(3)))
         centre = Gf.Vec3d(*((minimum[i] + maximum[i]) / 2.0 for i in range(3)))
         return cls(transform=Gf.Matrix4d(1.0).SetTranslate(centre), size=size)
