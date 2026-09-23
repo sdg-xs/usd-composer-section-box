@@ -17,8 +17,9 @@ import omni.usd
 from PIL import Image
 from pxr import Gf, UsdGeom, UsdLux
 
-from section_box.extension import SectionBoxExtension
+from section_box.extension import SectionBoxExtension, get_runtime_state
 from section_box.model import Face, SectionBox
+from section_box.selection import fit_box_to_paths
 
 APP = omni.kit.app.get_app()
 OUTPUT = Path(__file__).resolve().parent.parent / "verification"
@@ -94,6 +95,11 @@ def verify_selection_fit(window, state, stage):
     selection.set_selected_prim_paths([str(child.GetPath())], False)
     window._on_fit_to_selection()
     fitted = state.box
+    selected_paths = selection.get_selected_prim_paths()
+    assert fit_box_to_paths(stage, selected_paths) == fitted
+    assert fit_box_to_paths(stage, ["/Cube"]) is not None
+    assert selection.get_selected_prim_paths() == selected_paths, "Explicit fit changed active selection"
+    assert state.box == fitted, "Calculating an explicit fit changed the active box"
     world = UsdGeom.XformCache().GetLocalToWorldTransform(child.GetPrim())
     corners = [world.Transform(Gf.Vec3d(x, y, z)) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
     _selection_checks.check_optimal_footprint(fitted, corners)
@@ -211,6 +217,7 @@ async def verify():
         extension.on_startup("section.box")
         await frames(30)
         state = extension._state
+        assert get_runtime_state() is state
         assert extension._scene_view is not None
         assert extension._manipulator._root is not None
         checks.append("startup builds supported Scene UI shapes and attaches the viewport")
@@ -427,14 +434,17 @@ async def verify():
 
         extension.on_shutdown()
         extension = None
+        assert get_runtime_state() is None
         assert not settings.get("/rtx/sectionPlane/enabled")
         checks.append("shutdown removes the overlay, toolbar group, and clipping")
         extension = SectionBoxExtension()
         extension.on_startup("section.box")
         await frames(10)
         assert not extension._state.enabled
+        assert get_runtime_state() is extension._state
         extension.on_shutdown()
         extension = None
+        assert get_runtime_state() is None
         checks.append("extension restart starts unclipped")
         spec = importlib.util.spec_from_file_location("verify_gestures", Path(__file__).with_name("verify_gestures.py"))
         gestures = importlib.util.module_from_spec(spec)

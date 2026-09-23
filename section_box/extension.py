@@ -23,6 +23,14 @@ from .toolbar import ToolbarButton
 from .window import SectionBoxWindow
 
 
+_runtime_state: SectionBoxState | None = None
+
+
+def get_runtime_state() -> SectionBoxState | None:
+    """Return the state owned by the running extension, if available."""
+    return _runtime_state
+
+
 class SectionBoxExtension(omni.ext.IExt):
     """Omniverse Kit extension that provides an interactive section box."""
 
@@ -44,6 +52,7 @@ class SectionBoxExtension(omni.ext.IExt):
     # --- lifecycle -----------------------------------------------------------
 
     def on_startup(self, ext_id: str) -> None:
+        global _runtime_state
         carb.log_info(f"[section.box] Starting up (ext_id={ext_id})")
 
         self._state = SectionBoxState()
@@ -59,10 +68,15 @@ class SectionBoxExtension(omni.ext.IExt):
             .create_subscription_to_pop(self._on_update, name="section.box.viewport")
         )
 
+        _runtime_state = self._state
         carb.log_info("[section.box] Ready")
 
     def on_shutdown(self) -> None:
+        global _runtime_state
         carb.log_info("[section.box] Shutting down")
+
+        if _runtime_state is self._state:
+            _runtime_state = None
 
         # Tear down in reverse order.
         self._update_sub = None

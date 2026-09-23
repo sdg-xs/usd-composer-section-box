@@ -17,7 +17,7 @@ if "section_box" not in sys.modules:
 from pxr import Gf, Usd, UsdGeom
 
 from section_box.footprint import convex_hull, minimum_rectangle
-from section_box.selection import fit_box_to_selection, selection_center
+from section_box.selection import classify_visible_paths, fit_box_to_paths, fit_box_to_selection, selection_center
 
 
 class Context:
@@ -161,6 +161,23 @@ def multiple_branches():
     assert Gf.IsClose(first.transform, third.transform, 1e-8) and Gf.IsClose(first.size, third.size, 1e-8), (
         "Overlapping selection changes fit"
     )
+    explicit = fit_box_to_paths(stage, ["/Right", "/Left/Mesh", "/Left"])
+    assert explicit == first, "Explicit paths and selection produce different fits"
+    assert context.paths == ["/Left", "/Left/Mesh", "/Right"], "Explicit fit changed the selection"
+
+
+def explicit_paths_time():
+    stage = stage_for()
+    cube = UsdGeom.Cube.Define(stage, "/Moving")
+    translate = cube.AddTranslateOp()
+    translate.Set(Gf.Vec3d(0, 0, 0), Usd.TimeCode(1))
+    translate.Set(Gf.Vec3d(20, 0, 0), Usd.TimeCode(2))
+    first = fit_box_to_paths(stage, ["/Moving"], time=Usd.TimeCode(1))
+    second = fit_box_to_paths(stage, ["/Moving"], time=Usd.TimeCode(2))
+    assert first is not None and second is not None
+    assert first.transform.ExtractTranslation() == Gf.Vec3d(0, 0, 0)
+    assert second.transform.ExtractTranslation() == Gf.Vec3d(20, 0, 0)
+    assert first.size == second.size
 
 
 def square_determinism():
@@ -184,6 +201,9 @@ def square_determinism():
 
 def empty_and_degenerate():
     stage = stage_for()
+    assert fit_box_to_paths(None, ["/Missing"]) is None
+    assert fit_box_to_paths(stage, []) is None
+    assert fit_box_to_paths(stage, ["/Missing"]) is None
     assert fit_box_to_selection(None) is None
     assert fit_box_to_selection(Context(None, ["/Missing"])) is None
     assert fit_box_to_selection(Context(stage, [])) is None
@@ -217,6 +237,15 @@ def visibility_and_purpose():
     guide = rectangle(stage, "/Building/Guide", center=(-1000, -1000, 0))
     guide.CreatePurposeAttr(UsdGeom.Tokens.guide)
     check_box(fit_box_to_selection(Context(stage, ["/Building"])), included, (80, 10, 6), rotation(31))
+    UsdGeom.Xform.Define(stage, "/OnlyHidden")
+    child = rectangle(stage, "/OnlyHidden/Mesh")
+    child.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    visible, hidden, no_geometry = classify_visible_paths(
+        stage, ["/Building/Main", "/Building/Hidden", "/Building/Guide", "/OnlyHidden", "/Missing"]
+    )
+    assert visible == ["/Building/Main"]
+    assert hidden == ["/Building/Hidden", "/OnlyHidden"]
+    assert no_geometry == ["/Building/Guide", "/Missing"]
 
 
 def instance_geometry():
@@ -231,6 +260,7 @@ def instance_geometry():
     mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/Building/Mesh"))
     assert mesh.GetPrim().IsInstanceProxy()
     check_box(fit_box_to_selection(Context(stage, ["/Building"])), world_points(mesh), (40, 10, 6), rotation(48))
+    assert classify_visible_paths(stage, ["/Building"]) == (["/Building"], [], [])
 
 
 def tilted_analytic_geometry():
@@ -410,6 +440,7 @@ def verify_selection():
         child_rotation,
         georeferenced_rotation,
         multiple_branches,
+        explicit_paths_time,
         square_determinism,
         empty_and_degenerate,
         world_xy_in_y_up_stage,

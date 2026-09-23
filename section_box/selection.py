@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,32 +29,28 @@ def fit_box_to_selection(context: UsdContext | None) -> SectionBox | None:
     if stage is None:
         return None
     selection = context.get_selection()
-    paths = sorted(set(selection.get_selected_prim_paths())) if selection else []
+    paths = selection.get_selected_prim_paths() if selection else []
+    return fit_box_to_paths(stage, paths)
+
+
+def fit_box_to_paths(
+    stage: Usd.Stage | None, paths: Iterable[str], *, time: Usd.TimeCode = Usd.TimeCode.Default()
+) -> SectionBox | None:
+    """Fit visible geometry at explicit prim paths without changing selection."""
+    if stage is None:
+        return None
     roots = []
-    for path in paths:
+    for path in sorted(set(paths)):
         prim = stage.GetPrimAtPath(path)
         if prim.IsValid() and not any(prim.GetPath().HasPrefix(root.GetPath()) for root in roots):
             roots.append(prim)
     if not roots:
         return None
 
-    time = Usd.TimeCode.Default()
     transforms = UsdGeom.XformCache(time)
     purposes = [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy]
     bounds = UsdGeom.BBoxCache(time, purposes)
-    sources: list[tuple[Usd.Prim, bool]] = []
-    for root in roots:
-        traversal = iter(Usd.PrimRange(root, Usd.TraverseInstanceProxies()))
-        for prim in traversal:
-            imageable = UsdGeom.Imageable(prim)
-            if imageable and imageable.ComputeVisibility(time) == UsdGeom.Tokens.invisible:
-                traversal.PruneChildren()
-                continue
-            if prim.IsA(UsdGeom.PointInstancer):
-                traversal.PruneChildren()
-            if not prim.IsA(UsdGeom.Boundable) or (imageable and imageable.ComputePurpose() not in purposes):
-                continue
-            sources.append((prim, prim.IsA(UsdGeom.Mesh)))
+    sources = [source for root in roots for source in _visible_sources(root, time, purposes)[0]]
     if not sources:
         return None
     anchor = transforms.GetLocalToWorldTransform(sources[0][0]).ExtractTranslation()
@@ -104,6 +101,48 @@ def fit_box_to_selection(context: UsdContext | None) -> SectionBox | None:
     )
     padding = max(1e-9, 32 * sys.float_info.epsilon * max(1.0, *(abs(value) for value in center), *size))
     return SectionBox(transform=Gf.Matrix4d(axes, center), size=size + Gf.Vec3d(2 * padding))
+
+
+def classify_visible_paths(
+    stage: Usd.Stage | None, paths: Iterable[str], *, time: Usd.TimeCode = Usd.TimeCode.Default()
+) -> tuple[list[str], list[str], list[str]]:
+    """Partition asset roots into visible geometry, hidden geometry, and no usable geometry."""
+    visible, hidden, no_geometry = [], [], []
+    purposes = [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy]
+    bounds = UsdGeom.BBoxCache(time, purposes) if stage is not None else None
+    for path in sorted(set(paths)):
+        prim = stage.GetPrimAtPath(path) if stage is not None else None
+        if prim is None or not prim.IsValid():
+            no_geometry.append(path)
+            continue
+        sources, has_hidden_subtree = _visible_sources(prim, time, purposes)
+        if any(not bounds.ComputeWorldBound(source).GetRange().IsEmpty() for source, _ in sources):
+            visible.append(path)
+        elif has_hidden_subtree:
+            hidden.append(path)
+        else:
+            no_geometry.append(path)
+    return visible, hidden, no_geometry
+
+
+def _visible_sources(
+    root: Usd.Prim, time: Usd.TimeCode, purposes: list[str]
+) -> tuple[list[tuple[Usd.Prim, bool]], bool]:
+    sources: list[tuple[Usd.Prim, bool]] = []
+    has_hidden_subtree = False
+    traversal = iter(Usd.PrimRange(root, Usd.TraverseInstanceProxies()))
+    for prim in traversal:
+        imageable = UsdGeom.Imageable(prim)
+        if imageable and imageable.ComputeVisibility(time) == UsdGeom.Tokens.invisible:
+            has_hidden_subtree = True
+            traversal.PruneChildren()
+            continue
+        if prim.IsA(UsdGeom.PointInstancer):
+            traversal.PruneChildren()
+        if not prim.IsA(UsdGeom.Boundable) or (imageable and imageable.ComputePurpose() not in purposes):
+            continue
+        sources.append((prim, prim.IsA(UsdGeom.Mesh)))
+    return sources, has_hidden_subtree
 
 
 def _project_mesh(
