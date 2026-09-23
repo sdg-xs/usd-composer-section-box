@@ -1,0 +1,22 @@
+{
+  "runs": [
+    {
+      "date": "2026-09-23T08:30:12.216615+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 28,
+      "token_usage_status": "unavailable: host agent usage not exposed",
+      "monetary_cost": null
+    },
+    {
+      "date": "2026-09-23T10:01:19.476643+00:00",
+      "input_tokens": 5324,
+      "output_tokens": 2071,
+      "files": 12,
+      "backend": "gemini"
+    }
+  ],
+  "total_input_tokens": 5324,
+  "total_output_tokens": 2071,
+  "has_unmeasured_usage": true
+}

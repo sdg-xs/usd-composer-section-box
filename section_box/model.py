@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -87,6 +88,18 @@ class SectionBox:
     def with_face(self, face: Face, active: bool) -> SectionBox:
         faces = self.faces | {face} if active else self.faces - {face}
         return replace(self, faces=frozenset(faces))
+
+    @property
+    def z_rotation_degrees(self) -> float:
+        """World-XY heading of the box's X axis, in signed degrees."""
+        axis = self.transform.TransformDir(AXIS_VECTORS[0])
+        return math.degrees(math.atan2(axis[1], axis[0]))
+
+    def with_z_rotation(self, degrees: float) -> SectionBox:
+        """Set an absolute world-Z angle while keeping the box centered and upright."""
+        transform = Gf.Matrix4d().SetRotate(Gf.Rotation(AXIS_VECTORS[2], degrees))
+        transform.SetTranslateOnly(self.transform.ExtractTranslation())
+        return replace(self, transform=transform)
 
     def rotated(self, axis: int, degrees: float) -> SectionBox:
         _require_axis(axis)

@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import math
 import traceback
 import weakref
 from pathlib import Path
@@ -14,7 +15,7 @@ import omni.kit.undo
 import omni.kit.viewport.utility as vp_util
 import omni.usd
 from PIL import Image
-from pxr import Gf, Usd, UsdGeom, UsdLux
+from pxr import Gf, UsdGeom, UsdLux
 
 from section_box.extension import SectionBoxExtension
 from section_box.model import Face, SectionBox
@@ -27,6 +28,11 @@ _position_spec = importlib.util.spec_from_file_location(
 )
 _position_checks = importlib.util.module_from_spec(_position_spec)
 _position_spec.loader.exec_module(_position_checks)
+_selection_spec = importlib.util.spec_from_file_location(
+    "verify_selection", Path(__file__).with_name("verify_selection.py")
+)
+_selection_checks = importlib.util.module_from_spec(_selection_spec)
+_selection_spec.loader.exec_module(_selection_checks)
 
 
 async def frames(count=5):
@@ -88,14 +94,10 @@ def verify_selection_fit(window, state, stage):
     selection.set_selected_prim_paths([str(child.GetPath())], False)
     window._on_fit_to_selection()
     fitted = state.box
-    expected_rotation = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), 23)) * Gf.Matrix4d().SetRotate(
-        Gf.Rotation(Gf.Vec3d(0, 0, 1), 35)
-    )
     world = UsdGeom.XformCache().GetLocalToWorldTransform(child.GetPrim())
-    assert Gf.IsClose(fitted.size, Gf.Vec3d(4, 6, 8), 1e-6), fitted.size
+    corners = [world.Transform(Gf.Vec3d(x, y, z)) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+    _selection_checks.check_optimal_footprint(fitted, corners)
     assert Gf.IsClose(fitted.transform.ExtractTranslation(), world.Transform(Gf.Vec3d(0)), 1e-6)
-    for axis in (Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0), Gf.Vec3d(0, 0, 1)):
-        assert Gf.IsClose(fitted.transform.TransformDir(axis), expected_rotation.TransformDir(axis), 1e-6)
     assert fitted.faces == frozenset(Face)
     assert state.enabled
 
@@ -105,8 +107,6 @@ def verify_selection_fit(window, state, stage):
     selection.set_selected_prim_paths(paths, False)
     window._on_fit_to_selection()
     fitted = state.box
-    frame = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 35))
-    expected_range = Gf.Range3d()
     world_corners = []
     for prim in (child.GetPrim(), sibling.GetPrim()):
         world = UsdGeom.XformCache().GetLocalToWorldTransform(prim)
@@ -115,31 +115,81 @@ def verify_selection_fit(window, state, stage):
                 for z in (-1, 1):
                     corner = world.Transform(Gf.Vec3d(x, y, z))
                     world_corners.append(corner)
-                    expected_range.UnionWith(frame.GetInverse().Transform(corner))
-    assert Gf.IsClose(fitted.size, expected_range.GetSize(), 1e-6)
-    assert Gf.IsClose(fitted.transform.ExtractTranslation(), frame.Transform(expected_range.GetMidpoint()), 1e-6)
-    for axis in (Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0), Gf.Vec3d(0, 0, 1)):
-        assert Gf.IsClose(fitted.transform.TransformDir(axis), frame.TransformDir(axis), 1e-6)
-    for corner in world_corners:
-        for plane in fitted.active_planes():
-            assert Gf.Dot(Gf.Vec3d(*plane[:3]), corner) + plane[3] <= 1e-6
+    _selection_checks.check_optimal_footprint(fitted, world_corners)
     selection.set_selected_prim_paths(list(reversed(paths)), False)
     window._on_fit_to_selection()
     assert state.box == fitted
 
     selection.set_selected_prim_paths(["/FitTest/Child", "/Cube"], False)
     window._on_fit_to_selection()
-    assert state.box.transform.ExtractRotationMatrix() == Gf.Matrix3d(1)
-    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
-    expected_range = Gf.Range3d()
+    world_corners = []
     for path in ("/FitTest/Child", "/Cube"):
-        expected_range.UnionWith(bbox_cache.ComputeWorldBound(stage.GetPrimAtPath(path)).ComputeAlignedRange())
-    assert Gf.IsClose(state.box.size, expected_range.GetSize(), 1e-6)
+        world = UsdGeom.XformCache().GetLocalToWorldTransform(stage.GetPrimAtPath(path))
+        world_corners.extend(world.Transform(Gf.Vec3d(x, y, z)) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1))
+    _selection_checks.check_optimal_footprint(state.box, world_corners)
     fitted = state.box
     selection.set_selected_prim_paths([], False)
     window._on_fit_to_selection()
     assert state.box == fitted
     stage.RemovePrim("/FitTest")
+
+    mesh = _selection_checks.rectangle(stage, "/GeometryFit/Mesh")
+    state.enabled = False
+    before_fit = state.box
+    before_root = stage.GetRootLayer().ExportToString()
+    selection.set_selected_prim_paths(["/GeometryFit"], False)
+    window._on_fit_to_selection()
+    fitted = state.box
+    _selection_checks.check_box(
+        fitted, _selection_checks.world_points(mesh), (40, 10, 6), _selection_checks.rotation(31)
+    )
+    assert state.enabled and fitted.faces == frozenset(Face)
+    assert stage.GetRootLayer().ExportToString() == before_root
+    omni.kit.undo.undo()
+    assert state.box == before_fit and not state.enabled
+    omni.kit.undo.redo()
+    assert state.box == fitted and state.enabled
+    selection.set_selected_prim_paths([], False)
+    stage.RemovePrim("/GeometryFit")
+
+
+def verify_rotation_slider(window, state):
+    model = window._rotation_slider.model
+    fitted_axis = state.box.transform.TransformDir(Gf.Vec3d(1, 0, 0))
+    assert abs(model.as_float - math.degrees(math.atan2(fitted_axis[1], fitted_axis[0]))) < 1e-4
+    original = SectionBox(size=Gf.Vec3d(7, 11, 13), faces=frozenset({Face.MIN_X, Face.MAX_Z}))
+    original = original.rotated(2, 17).translated(Gf.Vec3d(100, 200, 30))
+    state.box = original
+    state.enabled = False
+    window._on_rotate(30)
+    expected = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 30))
+    assert Gf.IsClose(state.box.transform.ExtractRotationMatrix(), expected.ExtractRotationMatrix(), 1e-8)
+    first = state.box
+    window._on_rotate(30)
+    assert state.box == first, "The same displayed angle accumulated rotation"
+    assert state.box.size == original.size and state.box.faces == original.faces
+    assert state.box.transform.ExtractTranslation() == original.transform.ExtractTranslation()
+    assert not state.enabled
+
+    state.box = original
+    assert abs(model.as_float - 17) < 1e-4
+    undo_count = len(omni.kit.undo.get_undo_stack())
+    # Native UI emits edit subscriptions separately from model.begin_edit().
+    state.begin_edit()
+    model.set_value(25)
+    model.set_value(40)
+    model.set_value(65)
+    state.end_edit()
+    assert len(omni.kit.undo.get_undo_stack()) == undo_count + 1
+    final = state.box
+    expected.SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 65))
+    assert Gf.IsClose(final.transform.ExtractRotationMatrix(), expected.ExtractRotationMatrix(), 1e-8)
+    omni.kit.undo.undo()
+    assert state.box == original and abs(model.as_float - 17) < 1e-4, (state.box, original, model.as_float)
+    omni.kit.undo.redo()
+    assert state.box == final and abs(model.as_float - 65) < 1e-4
+    state.reset()
+    assert abs(model.as_float) < 1e-4
 
 
 async def verify():
@@ -168,7 +218,7 @@ async def verify():
         omni.usd.get_context().get_selection().set_selected_prim_paths(["/Cube"], False)
         extension._window._on_fit_to_selection()
         assert state.box.transform.ExtractTranslation() == Gf.Vec3d(100, 0, 0)
-        assert state.box.size == Gf.Vec3d(2, 2, 2)
+        assert Gf.IsClose(state.box.size, Gf.Vec3d(2, 2, 2), 1e-6)
         checks.append("fit to selection uses transformed world bounds")
 
         original = SectionBox(size=Gf.Vec3d(7, 11, 13), faces=frozenset({Face.MIN_X, Face.MAX_Z})).rotated(2, 31)
@@ -196,8 +246,13 @@ async def verify():
         )
 
         verify_selection_fit(extension._window, state, stage)
+        verify_rotation_slider(extension._window, state)
         checks.append(
-            "fit matches nested rotation and scale, encloses multiple selections in their common frame, and ignores empty selection"
+            "rotation slider sets an absolute Z angle, follows external changes, and groups a drag into one undo"
+        )
+        checks.extend(_selection_checks.verify_selection())
+        checks.append(
+            "fit keeps world-XY faces for tilted and baked geometry, supports undo/redo, and leaves scene geometry unchanged"
         )
 
         state.box = SectionBox()

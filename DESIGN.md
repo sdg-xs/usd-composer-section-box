@@ -36,6 +36,8 @@ The extension supports model inspection with one runtime section box. Six enable
 
 Panel controls and handles submit changes through the state edit API. It previews continuous edits in memory, then records one command at the end. Commands apply complete runtime snapshots, so fitting and loading restore geometry and activation together during undo.
 
+The rotation control sets an absolute world-Z angle and derives its displayed value from the box transform. Value changes update the box immediately; edit boundaries group a slider drag into one undo command. State notifications refresh the angle after fitting, loading, reset, and undo without creating another edit.
+
 Each command belongs to the scene generation in which it was created. Commands from a closed scene or unloaded extension cannot mutate a new scene. The extension does not clear unrelated application undo history.
 
 ## Code organization
@@ -57,7 +59,9 @@ path = positions.save_new("Floor 1")
 positions.load(path)
 ```
 
-`fit_box_to_selection(context)` returns a `SectionBox` or `None`; `selection_center(context)` returns a world-space `Gf.Vec3d` or `None`. Both use one private bounds calculation. `SavedPositionStore` exposes `list_positions`, `save_new`, `load`, `update`, and `delete`. Its list contains `(path, name)` pairs; the path identifies a scene position. `Inspection.saved_position_path` tracks the selected position independently of temporary edits.
+`fit_box_to_selection(context)` returns a `SectionBox` or `None`; `selection_center(context)` returns a world-space `Gf.Vec3d` or `None`. Fitting derives Z rotation from the selected geometry's world-XY footprint, keeping top and bottom faces horizontal even for tilted assets. `selection.py` owns USD traversal and `footprint.py` owns hull and rectangle calculations. Center retains the combined world-aligned midpoint. The [fitting design](docs/geometry-fit.md) records the behavior and numerical contract.
+
+`SavedPositionStore` exposes `list_positions`, `save_new`, `load`, `update`, and `delete`. Its list contains `(path, name)` pairs; the path identifies a scene position. `Inspection.saved_position_path` tracks the selected position independently of temporary edits.
 
 This layout accepts direct Kit and USD dependencies in exchange for short call paths. It retains the existing geometry API, command boundaries, and scene schema. The extension owns overlay attachment and teardown, including the stored frame needed when a viewport closes. Position commands explicitly notify controls after USD-only edits even when the runtime snapshot is unchanged.
 

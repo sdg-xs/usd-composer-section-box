@@ -216,6 +216,21 @@ def check_rotated_resize_clamp() -> str:
     return "over-shrinking every rotated face leaves its opposite face fixed"
 
 
+def check_absolute_z_rotation() -> str:
+    original = case_box().rotated(2, 37).translated(Gf.Vec3d(100, 200, 30))
+    for degrees in (-180, -90, -30, 0, 30, 90, 180):
+        result = original.with_z_rotation(degrees)
+        expected = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), degrees))
+        assert Gf.IsClose(result.transform.ExtractRotationMatrix(), expected.ExtractRotationMatrix(), TOLERANCE)
+        assert abs((result.z_rotation_degrees - degrees + 180) % 360 - 180) < TOLERANCE
+        assert result.with_z_rotation(degrees) == result
+        assert result.size == original.size and result.faces == original.faces
+        assert result.transform.ExtractTranslation() == original.transform.ExtractTranslation()
+    tilted = original.rotated(0, 40).with_z_rotation(25)
+    assert Gf.IsClose(tilted.transform.TransformDir(Gf.Vec3d(0, 0, 1)), Gf.Vec3d(0, 0, 1), TOLERANCE)
+    return "absolute Z rotation is repeatable, preserves box settings, and keeps horizontal top and bottom faces"
+
+
 CHECKS = (
     check_default_faces,
     check_min_z_plane,
@@ -232,6 +247,7 @@ CHECKS = (
     check_all_six_planes,
     check_face_setter,
     check_rotated_resize_clamp,
+    check_absolute_z_rotation,
 )
 
 

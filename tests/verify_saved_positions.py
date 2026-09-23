@@ -78,6 +78,7 @@ async def verify_saved_positions(extension, output):
     try:
         store.load(second_path)
         assert state.box == second and state.enabled
+        assert abs(extension._window._rotation_slider.model.as_float - 81) < 1e-4
         state.edit(box=second.translated(Gf.Vec3d(1, 2, 3)))
         for action in (
             lambda: store.save_new("Blocked"),

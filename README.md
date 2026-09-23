@@ -8,7 +8,7 @@ Fit the box to a selection, move and resize it in the viewport, and save named p
 
 - Six clipping faces that can be enabled independently.
 - Viewport handles for moving the box and resizing its active faces.
-- Fit to Selection with bounds and orientation matching.
+- Fit to Selection with geometry-derived Z rotation and horizontal top and bottom faces.
 - Center on Selection while preserving the box's size and rotation.
 - Named saved positions for switching between inspection areas.
 - Undo and redo for box edits and saved-position changes.
@@ -70,12 +70,16 @@ Add the parent directory of `section.box` as the search path. Avoid an extra nes
 | Size | Sets the box's full dimensions along its local X, Y, and Z axes. |
 | Active Faces | Chooses which sides clip geometry. |
 | Center on Selection | Moves the box to the selection's center, preserving size, rotation, active faces, and clipping activation. |
-| Fit to Selection | Fits the selection's bounds and orientation, enables all six faces, and turns clipping on. |
-| Rotation | Rotates the box around the chosen local axis by the specified angle. |
+| Fit to Selection | Fits selected geometry with Z rotation only, enables all six faces, and turns clipping on. |
+| Rotation | Sets the box's absolute Z angle immediately with one slider. A value of 30° means 30°, not an additional turn. |
 
 Only checked **Active Faces** show their plane, outline, and orange resize handle. Check just one face to display a single outlined plane. Shared edges remain visible when either adjacent face is active. The yellow center handle remains available to move the box.
 
-For one selected element, **Fit to Selection** uses its world rotation. For multiple elements, it uses their closest common ancestor's rotation and encloses their combined bounds. If they have no shared transformed ancestor, it uses world axes. Scale contributes to the box's dimensions.
+**Fit to Selection** finds the smallest enclosing rectangle around the selected geometry's world-XY footprint. The box rotates only around world Z, keeping its top and bottom faces parallel to XY. This works for a whole building or an individual asset, including rotation in parent transforms or baked into mesh points. Tilted assets are enclosed without tilting the box. Georeferenced placement and scale are included in the fit.
+
+Several selected elements produce one combined footprint. Irregular wings or outlying geometry can influence its angle. Non-mesh geometry uses conservative USD bounds.
+
+The **Rotation** slider displays the current Z angle, including after fitting, loading a saved position, or undoing an edit. Drag it to set the angle directly. Top and bottom faces remain parallel to XY, and one drag creates one undo step.
 
 The toolbar's cube button toggles clipping and opens the panel when clipping is enabled. Use Kit's **Undo** and **Redo** commands to revert or restore edits. One completed drag is one undo step.
 

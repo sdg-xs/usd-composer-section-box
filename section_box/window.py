@@ -44,7 +44,6 @@ class SectionBoxWindow:
         self._enabled_checkbox: Optional[ui.CheckBox] = None
         self._show_checkbox: Optional[ui.CheckBox] = None
         self._rotation_slider: Optional[ui.FloatSlider] = None
-        self._rotation_axis: int = 2  # default rotation axis: Z
         self._syncing = False
 
         self._build_window()
@@ -148,35 +147,21 @@ class SectionBoxWindow:
                     ui.Button(
                         "Fit to Selection",
                         clicked_fn=self._on_fit_to_selection,
-                        tooltip="Match the selection's center, size, and orientation.",
+                        tooltip="Fit selected geometry with top and bottom faces parallel to the scene's XY plane.",
                     )
                     ui.Button("Reset", clicked_fn=self._on_reset)
 
     def _build_rotation_section(self) -> None:
-        with ui.CollapsableFrame("Rotation", collapsed=True):
-            with ui.VStack(spacing=4):
-                with ui.HStack(height=24, spacing=8):
-                    ui.Label("Axis:", width=40)
-                    for axis in range(3):
-                        a = axis
-
-                        def _set_axis(_a=a):
-                            self._rotation_axis = int(_a)
-
-                        ui.Button(
-                            _AXIS_LABELS[axis],
-                            width=40,
-                            clicked_fn=_set_axis,
-                        )
-                with ui.HStack(height=24, spacing=8):
-                    ui.Label("Degrees:", width=60)
-                    model = ui.SimpleFloatModel(0.0)
-                    self._rotation_slider = ui.FloatSlider(model=model, min=-180.0, max=180.0)
-                ui.Button(
-                    "Apply Rotation",
-                    height=28,
-                    clicked_fn=lambda: self._on_rotate(model.as_float),
+        with ui.CollapsableFrame("Rotation", collapsed=False):
+            with ui.HStack(height=24, spacing=8):
+                ui.Label("Degrees :", width=60)
+                model = ui.SimpleFloatModel(self._state.box.z_rotation_degrees)
+                self._rotation_slider = ui.FloatSlider(
+                    model=model, min=-180.0, max=180.0, tooltip="Set the box's angle around world Z."
                 )
+                model.add_begin_edit_fn(lambda m: self._state.begin_edit())
+                model.add_end_edit_fn(lambda m: self._state.end_edit())
+                model.add_value_changed_fn(lambda m: self._on_rotate(m.as_float) if not self._syncing else None)
 
     def _build_saved_positions_section(self) -> None:
         with ui.CollapsableFrame("Saved Positions", collapsed=False):
@@ -201,7 +186,7 @@ class SectionBoxWindow:
         self._state.reset()
 
     def _on_rotate(self, degrees: float) -> None:
-        self._state.edit(box=self._state.box.rotated(self._rotation_axis, degrees))
+        self._state.edit(box=self._state.box.with_z_rotation(degrees))
 
     # --- state synchronisation -----------------------------------------------
 
@@ -229,3 +214,6 @@ class SectionBoxWindow:
 
         if self._show_checkbox and self._show_checkbox.model:
             self._show_checkbox.model.set_value(state.show_box)
+
+        if self._rotation_slider and self._rotation_slider.model:
+            self._rotation_slider.model.set_value(state.box.z_rotation_degrees)
